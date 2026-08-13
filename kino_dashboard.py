@@ -1,24 +1,26 @@
 import re
+import os
+import glob
 import math
 from itertools import combinations
 
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
 import streamlit as st
 
+
 st.set_page_config(
-    page_title="KinoOlega — статистика и динамика",
+    page_title="KinoOlega: статистика и динамика",
     page_icon="🎬",
     layout="wide"
 )
 
+
 # ============================================================
 # ПАСПОРТ ВОПРОСОВ (Лето#2026)
+# (раунд, тема, тип, номиналы)
 # ============================================================
 THEMES_META = [
-    # (раунд, тема, тип, номиналы)
     (1, "Хокку ✏️", "text", [100, 200, 300, 400, 500]),
     (1, "Намек на страну 📸", "image", [100, 200, 300, 400, 500]),
     (1, "СССР и Россия ✏️", "text", [100, 200, 300, 400, 500]),
@@ -35,6 +37,9 @@ THEMES_META = [
     ("ФИНАЛ", "Про ловкость рук", "text", [2000]),
     ("ФИНАЛ", "Про доминирование", "text", [2500]),
 ]
+
+SPECIAL_QUESTIONS = {61, 62, 63}
+SPECIAL_WEIGHT_MULTIPLIER = 3.0
 
 
 def build_question_passport() -> pd.DataFrame:
@@ -57,10 +62,6 @@ def build_question_passport() -> pd.DataFrame:
 
 
 QUESTION_PASSPORT = build_question_passport()
-
-# Специальные вопросы с утроенным весом
-SPECIAL_QUESTIONS = {61, 62, 63}
-SPECIAL_WEIGHT_MULTIPLIER = 3.0
 
 
 # ============================================================
@@ -102,10 +103,7 @@ def streak_stats(values):
 
 
 def recalc_for_group(group_df, passport_df, q_cols):
-    """
-    Пересчитывает взвешенные очки для группы игроков так,
-    как будто они играли в одной игре.
-    """
+    """Пересчитывает взвешенные очки для группы игроков, как будто они играли в одной игре."""
     total_players = len(group_df)
     if total_players == 0:
         return pd.DataFrame(), {}
@@ -149,30 +147,71 @@ def recalc_for_group(group_df, passport_df, q_cols):
     return pd.DataFrame(results), base_weights
 
 
+def find_local_excel_files() -> list:
+    """Ищет xlsx/xlsm в папке скрипта и в подпапке data."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(base_dir, "data")
+    found = []
+    for folder in (base_dir, data_dir):
+        if os.path.isdir(folder):
+            found.extend(glob.glob(os.path.join(folder, "*.xlsx")))
+            found.extend(glob.glob(os.path.join(folder, "*.xlsm")))
+    found = [p for p in found if not os.path.basename(p).startswith("~$")]
+    return sorted(set(found))
+
+
 # ============================================================
-# ЗАГРУЗКА ФАЙЛА
+# ЗАГОЛОВОК И ИСТОЧНИК ДАННЫХ
 # ============================================================
 st.title("🎬 KinoOlega: статистика и динамика")
 st.caption("Обычные очки из Q1...Qn. Фильтры по типу/темам, статистика, виртуальные игры.")
 
-uploaded_file = st.file_uploader("Загрузите Excel-файл KinoOlega", type=["xlsx", "xlsm"])
+local_files = find_local_excel_files()
+local_names = [os.path.basename(p) for p in local_files]
 
-if uploaded_file is None:
-    st.info("Загрузите Excel-файл, например: KinoOlega Open_Лето.xlsx")
-    st.stop()
+chosen_name = None
+uploaded_file = None
 
-uploaded_file.seek(0)
-try:
-    xls = pd.ExcelFile(uploaded_file)
-except Exception as e:
-    st.error(f"Не удалось открыть Excel-файл: {e}")
+with st.sidebar:
+    st.header("📁 Источник данных")
+    if local_files:
+        chosen_name = st.selectbox("Excel-файл из папки проекта", local_names)
+        st.caption(
+            "Файл найден рядом со скриптом (или в папке `data`) и подхватывается "
+            "автоматически. Обновишь файл — все увидят новые игры."
+        )
+    else:
+        uploaded_file = st.file_uploader(
+            "Загрузите Excel-файл KinoOlega",
+            type=["xlsx", "xlsm"]
+        )
+        st.caption("Локальные xlsx не найдены, поэтому включён ручной режим.")
+
+xls = None
+
+if chosen_name:
+    path = local_files[local_names.index(chosen_name)]
+    st.success(f"📂 Данные загружены автоматически: **{chosen_name}**")
+    try:
+        xls = pd.ExcelFile(path)
+    except Exception as e:
+        st.error(f"Не удалось открыть файл {chosen_name}: {e}")
+        st.stop()
+elif uploaded_file is not None:
+    uploaded_file.seek(0)
+    try:
+        xls = pd.ExcelFile(uploaded_file)
+    except Exception as e:
+        st.error(f"Не удалось открыть Excel-файл: {e}")
+        st.stop()
+else:
+    st.info("Положите xlsx рядом со скриптом (или в папку data) либо загрузите его вручную.")
     st.stop()
 
 sheet_names = xls.sheet_names
 default_sheet = "Лист2" if "Лист2" in sheet_names else sheet_names[0]
 
 with st.sidebar:
-    st.header("📁 Файл")
     sheet_name = st.selectbox("Лист Excel", sheet_names, index=sheet_names.index(default_sheet))
 
 try:
@@ -195,7 +234,6 @@ if "Имя игрока" not in df.columns or not q_cols:
 df = df.dropna(subset=["Имя игрока"]).copy()
 df["Имя игрока"] = df["Имя игрока"].astype(str).str.strip()
 
-# Метка игры
 if "Дата игры" in df.columns and "Игра" in df.columns:
     df["_game_label"] = df["Дата игры"].astype(str) + " · " + df["Игра"].astype(str)
 elif "Игра" in df.columns:
@@ -748,7 +786,6 @@ with tab_virtual:
         horizontal=True
     )
 
-    # Список всех уникальных пар "игрок — игра"
     all_pg = df[["Имя игрока", "_game_label"]].drop_duplicates()
     all_pg["label"] = all_pg["Имя игрока"].astype(str) + " — " + all_pg["_game_label"].astype(str)
     all_options = all_pg["label"].tolist()
@@ -774,9 +811,7 @@ with tab_virtual:
 
         if chosen:
             group_df = select_rows_by_labels(chosen)
-            result_df, base_weights = recalc_for_group(
-                group_df, QUESTION_PASSPORT, active_q
-            )
+            result_df, base_weights = recalc_for_group(group_df, QUESTION_PASSPORT, active_q)
 
             st.markdown("#### Результаты виртуальной игры")
             st.dataframe(
