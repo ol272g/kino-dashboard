@@ -552,34 +552,96 @@ with tab_overall:
 
 
 # ============================================================
-# ВКЛАДКА: ДРУГ ПРОТИВ ДРУГА
+# ВКЛАДКА: ДРУГ ПРОТИВ ДРУГА (ДВА РЕЖИМА)
 # ============================================================
 with tab_h2h:
     st.subheader("⚔️ Кто кого переиграл")
-    st.caption(
-        "Число вопросов в срезе, где игрок по строке ответил верно, "
-        "а игрок по столбцу — нет (в одной игре)."
+
+    h2h_mode = st.radio(
+        "Режим сравнения",
+        ["Только общие игры (реально)", "Гипотеза: все за одним столом"],
+        horizontal=True
     )
 
-    pivot = long_df.pivot_table(
-        index=["_game_label", "q_col"], columns="Имя игрока",
-        values="is_correct", aggfunc="max"
-    ).fillna(False)
-
     h2h_matrix = {}
-    for a in selected_players:
-        h2h_matrix[a] = {}
-        for b in selected_players:
-            if a == b:
-                h2h_matrix[a][b] = None
-            elif a in pivot.columns and b in pivot.columns:
-                h2h_matrix[a][b] = int(((pivot[a] == True) & (pivot[b] == False)).sum())
-            else:
-                h2h_matrix[a][b] = 0
+    common_games = {}
 
+    # --------------------------------------------------------
+    # РЕЖИМ 1: только реальные общие игры
+    # --------------------------------------------------------
+    if h2h_mode == "Только общие игры (реально)":
+        st.caption(
+            "Считаются вопросы **из общих реальных игр**, где игрок по строке ответил "
+            "верно, а игрок по столбцу — нет. Нет общих игр → 0."
+        )
+
+        pivot = long_df.pivot_table(
+            index=["_game_label", "q_col"], columns="Имя игрока",
+            values="is_correct", aggfunc="max"
+        )
+
+        participants = selected_players
+
+        for a in participants:
+            h2h_matrix[a] = {}
+            common_games[a] = {}
+            for b in participants:
+                if a == b:
+                    h2h_matrix[a][b] = None
+                    common_games[a][b] = None
+                elif a in pivot.columns and b in pivot.columns:
+                    mask = pivot[a].notna() & pivot[b].notna()
+                    common_games[a][b] = int(mask.sum())
+                    if common_games[a][b] == 0:
+                        h2h_matrix[a][b] = 0
+                    else:
+                        wins = (pivot.loc[mask, a] == True) & (pivot.loc[mask, b] == False)
+                        h2h_matrix[a][b] = int(wins.sum())
+                else:
+                    h2h_matrix[a][b] = 0
+                    common_games[a][b] = 0
+
+    # --------------------------------------------------------
+    # РЕЖИМ 2: гипотетическая общая игра
+    # --------------------------------------------------------
+    else:
+        st.caption(
+            "Все выбранные участники считаются сидевшими **за одним столом**: "
+            "каждый вопрос среза сравнивается независимо от реальной игры. "
+            "+1 игроку по строке, если он ответил, а игрок по столбцу — нет. "
+            "Корректно, только если игры шли на одном пакете вопросов."
+        )
+
+        vecs = {}
+        for _, row in plot_df.iterrows():
+            label = make_row_label(row)
+            vecs[label] = (row[filtered_q_cols].astype(float) > 0)
+
+        participants = list(vecs.keys())
+
+        for a in participants:
+            h2h_matrix[a] = {}
+            common_games[a] = {}
+            for b in participants:
+                if a == b:
+                    h2h_matrix[a][b] = None
+                    common_games[a][b] = None
+                else:
+                    h2h_matrix[a][b] = int((vecs[a] & ~vecs[b]).sum())
+                    common_games[a][b] = len(filtered_q_cols)
+
+    # --------------------------------------------------------
+    # ОБЩИЙ ВЫВОД (для обоих режимов)
+    # --------------------------------------------------------
     h2h_df = pd.DataFrame(h2h_matrix).T
     h2h_df.index.name = "Игрок"
     st.dataframe(h2h_df.fillna("—"), use_container_width=True)
+
+    if h2h_mode == "Только общие игры (реально)":
+        with st.expander("🔍 Сколько вопросов сравнено у каждой пары"):
+            common_df = pd.DataFrame(common_games).T
+            common_df.index.name = "Игрок"
+            st.dataframe(common_df.fillna("—"), use_container_width=True)
 
     st.markdown("---")
     st.subheader("📊 Процент доминирования")
@@ -589,9 +651,9 @@ with tab_h2h:
     )
 
     dom_matrix = {}
-    for a in selected_players:
+    for a in participants:
         dom_matrix[a] = {}
-        for b in selected_players:
+        for b in participants:
             if a == b:
                 dom_matrix[a][b] = None
             else:
@@ -599,33 +661,48 @@ with tab_h2h:
                 b_vs_a = h2h_matrix[b][a]
                 total = a_vs_b + b_vs_a
                 if total == 0:
-                    dom_matrix[a][b] = 50.0
+                    dom_matrix[a][b] = None
                 else:
                     dom_matrix[a][b] = round(100.0 * a_vs_b / total, 1)
 
     dom_df = pd.DataFrame(dom_matrix).T
     dom_df.index.name = "Игрок"
-    st.dataframe(dom_df.fillna("—").astype(str).replace({"None": "—"}), use_container_width=True)
+    st.dataframe(
+        dom_df.fillna("—").astype(str).replace({"None": "—"}),
+        use_container_width=True
+    )
 
     st.markdown("---")
     st.subheader("👑 Итоговый рейтинг доминирования")
-    st.caption("Средний процент доминирования игрока над всеми соперниками в срезе.")
+    st.caption("Средний процент доминирования над всеми соперниками, по которым есть данные.")
 
     dom_scores = []
-    for a in selected_players:
-        vals = [dom_matrix[a][b] for b in selected_players if b != a and dom_matrix[a][b] is not None]
-        avg_dom = round(sum(vals) / len(vals), 1) if vals else 0
-        dom_scores.append({"Игрок": a, "Средний % доминирования": avg_dom})
+    for a in participants:
+        vals = [dom_matrix[a][b] for b in participants
+                if b != a and dom_matrix[a][b] is not None]
+        avg_dom = round(sum(vals) / len(vals), 1) if vals else None
+        dom_scores.append({
+            "Игрок": a,
+            "Средний % доминирования": avg_dom if avg_dom is not None else "—",
+            "Соперников": len(vals),
+        })
 
-    dom_scores_df = pd.DataFrame(dom_scores).sort_values("Средний % доминирования", ascending=False)
+    dom_scores_df = pd.DataFrame(dom_scores).sort_values(
+        "Средний % доминирования",
+        ascending=False,
+        key=lambda s: pd.to_numeric(s, errors="coerce")
+    )
     st.dataframe(dom_scores_df, use_container_width=True, hide_index=True)
 
-    if len(dom_scores_df) > 1:
+    plot_dom = dom_scores_df[dom_scores_df["Средний % доминирования"] != "—"].copy()
+    if len(plot_dom) > 1:
+        plot_dom["Средний % доминирования"] = plot_dom["Средний % доминирования"].astype(float)
         fig_dom = go.Figure(go.Bar(
-            x=dom_scores_df["Средний % доминирования"],
-            y=dom_scores_df["Игрок"],
+            x=plot_dom["Средний % доминирования"],
+            y=plot_dom["Игрок"],
             orientation="h",
-            marker_color=["#2ecc71" if v > 50 else "#e74c3c" for v in dom_scores_df["Средний % доминирования"]]
+            marker_color=["#2ecc71" if v > 50 else "#e74c3c"
+                          for v in plot_dom["Средний % доминирования"]]
         ))
         fig_dom.update_layout(
             title="Средний процент доминирования (>50% — доминирует)",
